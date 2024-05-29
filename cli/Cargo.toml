@@ -1,0 +1,36 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.53"
+dotenv_codegen = "0.15.0"
+clap = { version = "4.5.4", features = ["derive"] }
+
+anchor-client = { version = "0.29.0", features = ["async"] }
+anchor-lang = "0.29.0"
+solana-client = "<1.17.0"
+solana-sdk = "<1.17.0"
+solana-transaction-status = "<1.17.0"
+raydium-cp-swap = { git = "https://github.com/raydium-io/raydium-cp-swap", branch = "add_client", features = [
+    "no-entrypoint",
+    "client",
+], version = "0.1.0" }
+spl-token = { version = "4.0.0", features = ["no-entrypoint"] }
+spl-memo = "4.0.0"
+spl-associated-token-account = { version = "2.2.0", features = [
+    "no-entrypoint",
+] }
+spl-token-2022 = { version = "0.9.0", features = ["no-entrypoint"] }
+jito-searcher-client = { path = "../searcher_client" }
+jito-protos = { path = "../jito_protos" }
+
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tonic = { version = "0.10", features = [
+    "tls",
+    "tls-roots",
+    "tls-webpki-roots",
+] }
+
+env_logger = "0.10"
