@@ -96,54 +96,54 @@ pub fn initialize_pool_instr(
     Ok(instructions)
 }
 
-pub fn deposit_instr(
-    config: &ClientConfig,
-    pool_id: Pubkey,
-    token_0_mint: Pubkey,
-    token_1_mint: Pubkey,
-    token_lp_mint: Pubkey,
-    token_0_vault: Pubkey,
-    token_1_vault: Pubkey,
-    user_token_0_account: Pubkey,
-    user_token_1_account: Pubkey,
-    user_token_lp_account: Pubkey,
-    lp_token_amount: u64,
-    maximum_token_0_amount: u64,
-    maximum_token_1_amount: u64,
-) -> Result<Vec<Instruction>> {
-    let payer = read_keypair_file(&config.payer_path)?;
-    let url = Cluster::Custom(config.http_url.clone(), config.ws_url.clone());
-    // Client.
-    let client = Client::new(url, Rc::new(payer));
-    let program = client.program(config.raydium_cp_program)?;
+// pub fn deposit_instr(
+//     config: &ClientConfig,
+//     pool_id: Pubkey,
+//     token_0_mint: Pubkey,
+//     token_1_mint: Pubkey,
+//     token_lp_mint: Pubkey,
+//     token_0_vault: Pubkey,
+//     token_1_vault: Pubkey,
+//     user_token_0_account: Pubkey,
+//     user_token_1_account: Pubkey,
+//     user_token_lp_account: Pubkey,
+//     lp_token_amount: u64,
+//     maximum_token_0_amount: u64,
+//     maximum_token_1_amount: u64,
+// ) -> Result<Vec<Instruction>> {
+//     let payer = read_keypair_file(&config.payer_path)?;
+//     let url = Cluster::Custom(config.http_url.clone(), config.ws_url.clone());
+//     // Client.
+//     let client = Client::new(url, Rc::new(payer));
+//     let program = client.program(config.raydium_cp_program)?;
 
-    let (authority, __bump) = Pubkey::find_program_address(&[AUTH_SEED.as_bytes()], &program.id());
+//     let (authority, __bump) = Pubkey::find_program_address(&[AUTH_SEED.as_bytes()], &program.id());
 
-    let instructions = program
-        .request()
-        .accounts(raydium_cp_accounts::Deposit {
-            owner: program.payer(),
-            authority,
-            pool_state: pool_id,
-            owner_lp_token: user_token_lp_account,
-            token_0_account: user_token_0_account,
-            token_1_account: user_token_1_account,
-            token_0_vault,
-            token_1_vault,
-            token_program: spl_token::id(),
-            token_program_2022: spl_token_2022::id(),
-            vault_0_mint: token_0_mint,
-            vault_1_mint: token_1_mint,
-            lp_mint: token_lp_mint,
-        })
-        .args(raydium_cp_instructions::Deposit {
-            lp_token_amount,
-            maximum_token_0_amount,
-            maximum_token_1_amount,
-        })
-        .instructions()?;
-    Ok(instructions)
-}
+//     let instructions = program
+//         .request()
+//         .accounts(raydium_cp_accounts::Deposit {
+//             owner: program.payer(),
+//             authority,
+//             pool_state: pool_id,
+//             owner_lp_token: user_token_lp_account,
+//             token_0_account: user_token_0_account,
+//             token_1_account: user_token_1_account,
+//             token_0_vault,
+//             token_1_vault,
+//             token_program: spl_token::id(),
+//             token_program_2022: spl_token_2022::id(),
+//             vault_0_mint: token_0_mint,
+//             vault_1_mint: token_1_mint,
+//             lp_mint: token_lp_mint,
+//         })
+//         .args(raydium_cp_instructions::Deposit {
+//             lp_token_amount,
+//             maximum_token_0_amount,
+//             maximum_token_1_amount,
+//         })
+//         .instructions()?;
+//     Ok(instructions)
+// }
 
 // pub fn withdraw_instr(
 //     config: &ClientConfig,

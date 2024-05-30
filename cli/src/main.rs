@@ -29,11 +29,11 @@ use tonic::codegen::{Body, Bytes, StdError};
 use env_logger::TimestampPrecision;
 
 use instructions::amm_instructions::*;
-use instructions::rpc::send_txn;
 use instructions::token_instructions::*;
 use instructions::utils::*;
 
 // Define App args and commands struct
+/// Jito Raydium CPMM Bundler Cli App
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct App {
@@ -56,23 +56,23 @@ pub struct App {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    InitializePool {
-        mint0: Pubkey,
-        mint1: Pubkey,
+    SendBundle {
+        /// Create pool arguments
+        token_0_mint: Pubkey,
+        token_1_mint: Pubkey,
         init_amount_0: u64,
         init_amount_1: u64,
         #[arg(short, long, default_value_t = 0)]
         open_time: u64,
-    },
-    SendBundle {
-        pool_id: Pubkey,
-        user_token_0: Pubkey,
-        user_token_1: Pubkey,
-        lp_token_amount: u64,
+        /// Snipe token arguments
+        user_input_token: Pubkey,
         user_input_amount: u64,
+        /// Disperse token to wallets arguments
+        user_disperse_token: Pubkey,
         #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
         disperse_wallets: Vec<Pubkey>,
         disperse_amount: u64,
+        /// Jito tip
         #[arg(short, long, default_value_t = 1000)]
         jito_tip: u64,
     },
@@ -170,145 +170,106 @@ where
     let program = anchor_client.program(client_config.raydium_cp_program)?;
 
     match app.command {
-        Command::InitializePool {
-            mint0,
-            mint1,
+        Command::SendBundle {
+            token_0_mint,
+            token_1_mint,
             init_amount_0,
             init_amount_1,
             open_time,
-        } => {
-            let (mint0, mint1, init_amount_0, init_amount_1) = if mint0 > mint1 {
-                (mint1, mint0, init_amount_1, init_amount_0)
-            } else {
-                (mint0, mint1, init_amount_0, init_amount_1)
-            };
-            let load_pubkeys = vec![mint0, mint1];
-            let rsps = rpc_client.get_multiple_accounts(&load_pubkeys).unwrap();
-            let token_0_program = rsps[0].clone().unwrap().owner;
-            let token_1_program = rsps[1].clone().unwrap().owner;
-
-            let config = client_config.clone();
-            let payer_address = payer.pubkey();
-            let initialize_pool_ixs = tokio::task::spawn_blocking(move || {
-                initialize_pool_instr(
-                    &config,
-                    mint0,
-                    mint1,
-                    token_0_program,
-                    token_1_program,
-                    spl_associated_token_account::get_associated_token_address(&payer_address, &mint0),
-                    spl_associated_token_account::get_associated_token_address(&payer_address, &mint1),
-                    raydium_cp_swap::create_pool_fee_reveiver::id(),
-                    init_amount_0,
-                    init_amount_1,
-                    open_time,
-                )
-            })
-            .await??;
-
-            let signers = vec![&payer];
-            let recent_hash = rpc_client.get_latest_blockhash()?;
-            let txn = Transaction::new_signed_with_payer(&initialize_pool_ixs, Some(&payer.pubkey()), &signers, recent_hash);
-            let signature = tokio::task::spawn_blocking(move || send_txn(&rpc_client, &txn, true)).await??;
-            println!("Signature: {signature}");
-        }
-        Command::SendBundle {
-            pool_id,
-            user_token_0,
-            user_token_1,
-            lp_token_amount,
+            user_input_token,
             user_input_amount,
+            user_disperse_token,
             disperse_wallets,
             disperse_amount,
             jito_tip,
         } => {
-            let user_input_token = user_token_1; // Swap with quote token
-
-            /*** prepare seed lp instructions ***/
-            let pool_state = program.account::<raydium_cp_swap::states::PoolState>(pool_id).await?;
+            /*** prepare create pool instructions ***/
+            // ensure pool uniqueness
+            let (token_0_mint, token_1_mint, init_amount_0, init_amount_1) = if token_0_mint > token_1_mint {
+                (token_1_mint, token_0_mint, init_amount_1, init_amount_0)
+            } else {
+                (token_0_mint, token_1_mint, init_amount_0, init_amount_1)
+            };
             // load account
-            let load_pubkeys = vec![
-                pool_state.amm_config,
-                pool_state.token_0_vault,
-                pool_state.token_1_vault,
-                pool_state.token_0_mint,
-                pool_state.token_1_mint,
-                user_input_token,
-            ];
+            let load_pubkeys = vec![token_0_mint, token_1_mint];
+            let rsps = rpc_client.get_multiple_accounts(&load_pubkeys).unwrap();
+            let token_0_program = rsps[0].clone().unwrap().owner;
+            let token_1_program = rsps[1].clone().unwrap().owner;
+
+            let mut initialize_pool_ixs = vec![build_memo(format!("jito bundle 0: initialize pool").as_bytes(), &[])];
+            initialize_pool_ixs.extend(initialize_pool_instr(
+                &client_config,
+                token_0_mint,
+                token_1_mint,
+                token_0_program,
+                token_1_program,
+                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
+                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
+                raydium_cp_swap::create_pool_fee_reveiver::id(),
+                init_amount_0,
+                init_amount_1,
+                open_time,
+            )?);
+
+            /*** Calculate arguments for a new pool ***/
+            // Calculate Pool id
+            let amm_config_index = 0u16;
+            let (amm_config_key, __bump) = Pubkey::find_program_address(
+                &[raydium_cp_swap::states::config::AMM_CONFIG_SEED.as_bytes(), &amm_config_index.to_be_bytes()],
+                &program.id(),
+            );
+
+            let (pool_account_key, __bump) = Pubkey::find_program_address(
+                &[
+                    raydium_cp_swap::states::pool::POOL_SEED.as_bytes(),
+                    amm_config_key.to_bytes().as_ref(),
+                    token_0_mint.to_bytes().as_ref(),
+                    token_1_mint.to_bytes().as_ref(),
+                ],
+                &program.id(),
+            );
+            let (token_0_vault, __bump) = Pubkey::find_program_address(
+                &[
+                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
+                    pool_account_key.to_bytes().as_ref(),
+                    token_0_mint.to_bytes().as_ref(),
+                ],
+                &program.id(),
+            );
+            let (token_1_vault, __bump) = Pubkey::find_program_address(
+                &[
+                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
+                    pool_account_key.to_bytes().as_ref(),
+                    token_1_mint.to_bytes().as_ref(),
+                ],
+                &program.id(),
+            );
+            let (observation_key, __bump) = Pubkey::find_program_address(
+                &[
+                    raydium_cp_swap::states::oracle::OBSERVATION_SEED.as_bytes(),
+                    pool_account_key.to_bytes().as_ref(),
+                ],
+                &program.id(),
+            );
+            println!(
+                "\npool_id: {pool_account_key}\ntoken_0_vault: {token_0_vault} , token_1_vault: {token_1_vault}\nobservation_account: {observation_key}\n"
+            );
+
+            // load account
+            let load_pubkeys = vec![amm_config_key, token_0_mint, token_1_mint, user_input_token];
             let rsps = rpc_client.get_multiple_accounts(&load_pubkeys)?;
             let amm_config_account: &Option<solana_sdk::account::Account> = &rsps[0];
-            let token_0_vault_account: &Option<solana_sdk::account::Account> = &rsps[1];
-            let token_1_vault_account: &Option<solana_sdk::account::Account> = &rsps[2];
-            let token_0_mint_account: &Option<solana_sdk::account::Account> = &rsps[3];
-            let token_1_mint_account: &Option<solana_sdk::account::Account> = &rsps[4];
-            let user_input_token_account: &Option<solana_sdk::account::Account> = &rsps[5];
+            let token_0_mint_account: &Option<solana_sdk::account::Account> = &rsps[1];
+            let token_1_mint_account: &Option<solana_sdk::account::Account> = &rsps[2];
+            let user_input_token_account: &Option<solana_sdk::account::Account> = &rsps[3];
             // docode account
-            let mut token_0_vault_data = token_0_vault_account.clone().unwrap().data;
-            let mut token_1_vault_data = token_1_vault_account.clone().unwrap().data;
             let mut token_0_mint_data = token_0_mint_account.clone().unwrap().data;
             let mut token_1_mint_data = token_1_mint_account.clone().unwrap().data;
             let mut user_input_token_data = user_input_token_account.clone().unwrap().data;
             let amm_config_state = deserialize_anchor_account::<raydium_cp_swap::states::AmmConfig>(amm_config_account.as_ref().unwrap())?;
-            let token_0_vault_info = StateWithExtensionsMut::<Account>::unpack(&mut token_0_vault_data)?;
-            let token_1_vault_info = StateWithExtensionsMut::<Account>::unpack(&mut token_1_vault_data)?;
             let token_0_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_0_mint_data)?;
             let token_1_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_1_mint_data)?;
             let user_input_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_input_token_data)?;
-
-            let (total_token_0_amount, total_token_1_amount) =
-                pool_state.vault_amount_without_fee(token_0_vault_info.base.amount, token_1_vault_info.base.amount);
-
-            // calculate amount
-            let results = raydium_cp_swap::curve::CurveCalculator::lp_tokens_to_trading_tokens(
-                u128::from(lp_token_amount),
-                u128::from(pool_state.lp_supply),
-                u128::from(total_token_0_amount),
-                u128::from(total_token_1_amount),
-                raydium_cp_swap::curve::RoundDirection::Ceiling,
-            )
-            .ok_or(raydium_cp_swap::error::ErrorCode::ZeroTradingTokens)
-            .unwrap();
-            println!(
-                "amount_0:{}, amount_1:{}, lp_token_amount:{}",
-                results.token_0_amount, results.token_1_amount, lp_token_amount
-            );
-
-            // calc with slippage
-            let amount_0_with_slippage = amount_with_slippage(results.token_0_amount as u64, client_config.slippage, true);
-            let amount_1_with_slippage = amount_with_slippage(results.token_1_amount as u64, client_config.slippage, true);
-            // calc with transfer_fee
-            let transfer_fee = get_pool_mints_inverse_fee(
-                &rpc_client,
-                pool_state.token_0_mint,
-                pool_state.token_1_mint,
-                amount_0_with_slippage,
-                amount_1_with_slippage,
-            );
-            println!("transfer_fee_0:{}, transfer_fee_1:{}", transfer_fee.0.transfer_fee, transfer_fee.1.transfer_fee);
-
-            let amount_0_max = (amount_0_with_slippage as u64).checked_add(transfer_fee.0.transfer_fee).unwrap();
-            let amount_1_max = (amount_1_with_slippage as u64).checked_add(transfer_fee.1.transfer_fee).unwrap();
-            println!("amount_0_max:{}, amount_1_max:{}", amount_0_max, amount_1_max);
-
-            let mut seed_lp_ixs = vec![build_memo(format!("jito bundle 0: seed lp").as_bytes(), &[])];
-            let create_user_lp_token_instr = create_ata_token_account_instr(&client_config, spl_token::id(), &pool_state.lp_mint, &payer.pubkey())?;
-            seed_lp_ixs.extend(create_user_lp_token_instr);
-            let deposit_instr = deposit_instr(
-                &client_config,
-                pool_id,
-                pool_state.token_0_mint,
-                pool_state.token_1_mint,
-                pool_state.lp_mint,
-                pool_state.token_0_vault,
-                pool_state.token_1_vault,
-                user_token_0,
-                user_token_1,
-                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &pool_state.lp_mint),
-                lp_token_amount,
-                amount_0_max,
-                amount_1_max,
-            )?;
-            seed_lp_ixs.extend(deposit_instr);
 
             /*** prepare snipe token instructions ***/
             let epoch = rpc_client.get_epoch_info().unwrap().epoch;
@@ -326,34 +287,34 @@ where
                 input_token_program,
                 output_token_program,
                 transfer_fee,
-            ) = if user_input_token_info.base.mint == token_0_vault_info.base.mint {
+            ) = if user_input_token_info.base.mint == token_0_mint {
                 (
                     raydium_cp_swap::curve::TradeDirection::ZeroForOne,
-                    total_token_0_amount,
-                    total_token_1_amount,
+                    init_amount_0,
+                    init_amount_1,
                     user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &pool_state.token_1_mint),
-                    pool_state.token_0_vault,
-                    pool_state.token_1_vault,
-                    pool_state.token_0_mint,
-                    pool_state.token_1_mint,
-                    pool_state.token_0_program,
-                    pool_state.token_1_program,
+                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
+                    token_0_vault,
+                    token_1_vault,
+                    token_0_mint,
+                    token_1_mint,
+                    token_0_program,
+                    token_1_program,
                     get_transfer_fee(&token_0_mint_info, epoch, user_input_amount),
                 )
             } else {
                 (
                     raydium_cp_swap::curve::TradeDirection::OneForZero,
-                    total_token_1_amount,
-                    total_token_0_amount,
+                    init_amount_1,
+                    init_amount_0,
                     user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &pool_state.token_0_mint),
-                    pool_state.token_1_vault,
-                    pool_state.token_0_vault,
-                    pool_state.token_1_mint,
-                    pool_state.token_0_mint,
-                    pool_state.token_1_program,
-                    pool_state.token_0_program,
+                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
+                    token_1_vault,
+                    token_0_vault,
+                    token_1_mint,
+                    token_0_mint,
+                    token_1_program,
+                    token_0_program,
                     get_transfer_fee(&token_1_mint_info, epoch, user_input_amount),
                 )
             };
@@ -383,9 +344,9 @@ where
             snipe_token_ixs.extend(create_user_output_token_instr);
             let swap_base_in_instr = swap_base_input_instr(
                 &client_config,
-                pool_id,
-                pool_state.amm_config,
-                pool_state.observation_key,
+                pool_account_key,
+                amm_config_key,
+                observation_key,
                 user_input_token,
                 user_output_token,
                 input_vault,
@@ -407,7 +368,7 @@ where
             for disperse_wallet in disperse_wallets {
                 disperse_wallet_ixs.extend(spl_token_transfer_instr(
                     &client_config,
-                    &user_token_0,
+                    &user_disperse_token,
                     &disperse_wallet,
                     disperse_each_amount,
                     &payer,
@@ -451,7 +412,12 @@ where
 
             send_bundle_with_confirmation(
                 &[
-                    VersionedTransaction::from(Transaction::new_signed_with_payer(&seed_lp_ixs, Some(&payer.pubkey()), &signers, recent_hash)),
+                    VersionedTransaction::from(Transaction::new_signed_with_payer(
+                        &initialize_pool_ixs,
+                        Some(&payer.pubkey()),
+                        &signers,
+                        recent_hash,
+                    )),
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
                         &snipe_token_ixs,
                         Some(&payer.pubkey()),
