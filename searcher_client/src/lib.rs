@@ -1,4 +1,5 @@
 use std::{
+    future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -7,14 +8,11 @@ use futures_util::StreamExt;
 use jito_protos::{
     auth::{auth_service_client::AuthServiceClient, Role},
     bundle::{
-        bundle_result::Result as BundleResultType, rejected::Reason, Accepted, Bundle,
-        BundleResult, InternalError, SimulationFailure, StateAuctionBidRejected,
+        bundle_result::Result as BundleResultType, rejected::Reason, Accepted, Bundle, BundleResult, InternalError, SimulationFailure, StateAuctionBidRejected,
         WinningBatchBidRejected,
     },
     convert::proto_packet_from_versioned_tx,
-    searcher::{
-        searcher_service_client::SearcherServiceClient, SendBundleRequest, SendBundleResponse,
-    },
+    searcher::{searcher_service_client::SearcherServiceClient, SendBundleRequest, SendBundleResponse},
 };
 use log::{info, warn};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -61,26 +59,16 @@ pub type BlockEngineConnectionResult<T> = Result<T, BlockEngineConnectionError>;
 pub async fn get_searcher_client_auth(
     block_engine_url: &str,
     auth_keypair: &Arc<Keypair>,
-) -> BlockEngineConnectionResult<
-    SearcherServiceClient<InterceptedService<Channel, ClientInterceptor>>,
-> {
+) -> BlockEngineConnectionResult<SearcherServiceClient<InterceptedService<Channel, ClientInterceptor>>> {
     let auth_channel = create_grpc_channel(block_engine_url).await?;
-    let client_interceptor = ClientInterceptor::new(
-        AuthServiceClient::new(auth_channel),
-        auth_keypair,
-        Role::Searcher,
-    )
-    .await?;
+    let client_interceptor = ClientInterceptor::new(AuthServiceClient::new(auth_channel), auth_keypair, Role::Searcher).await?;
 
     let searcher_channel = create_grpc_channel(block_engine_url).await?;
-    let searcher_client =
-        SearcherServiceClient::with_interceptor(searcher_channel, client_interceptor);
+    let searcher_client = SearcherServiceClient::with_interceptor(searcher_channel, client_interceptor);
     Ok(searcher_client)
 }
 
-pub async fn get_searcher_client_no_auth(
-    block_engine_url: &str,
-) -> BlockEngineConnectionResult<SearcherServiceClient<Channel>> {
+pub async fn get_searcher_client_no_auth(block_engine_url: &str) -> BlockEngineConnectionResult<SearcherServiceClient<Channel>> {
     let searcher_channel = create_grpc_channel(block_engine_url).await?;
     let searcher_client = SearcherServiceClient::new(searcher_channel);
     Ok(searcher_client)
@@ -107,8 +95,7 @@ where
     <T::ResponseBody as Body>::Error: Into<StdError> + Send,
     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::Future: std::marker::Send,
 {
-    let bundle_signatures: Vec<Signature> =
-        transactions.iter().map(|tx| tx.signatures[0]).collect();
+    let bundle_signatures: Vec<Signature> = transactions.iter().map(|tx| tx.signatures[0]).collect();
 
     let result = send_bundle_no_wait(transactions, searcher_client).await?;
 
@@ -116,11 +103,19 @@ where
     let uuid = result.into_inner().uuid;
     info!("Bundle sent. UUID: {:?}", uuid);
 
-    info!("Waiting for 5 seconds to hear results...");
-    let mut time_left = 5000;
+    // Read the environment variable
+    let wait_seconds = std::env::var("JITO_BUNDLE_RESULT_WAIT_SECONDS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse::<u64>()
+        .unwrap_or(5);
+
+    info!("Waiting for {wait_seconds} seconds to hear results...");
+    let mut time_left = wait_seconds * 1000;
     while let Ok(Some(Ok(results))) = timeout(
         Duration::from_millis(time_left),
-        bundle_results_subscription.next(),
+        bundle_results_subscription
+            .filter(|bundle_result| future::ready(matches!(bundle_result, Ok(bundle) if bundle.bundle_id == uuid)))
+            .next(),
     )
     .await
     {
@@ -137,31 +132,16 @@ where
                         auction_id,
                         simulated_bid_lamports,
                         msg: _,
-                    })) => {
-                        return Err(Box::new(BundleRejectionError::WinningBatchBidRejected(
-                            auction_id,
-                            simulated_bid_lamports,
-                        )))
-                    }
+                    })) => return Err(Box::new(BundleRejectionError::WinningBatchBidRejected(auction_id, simulated_bid_lamports))),
                     Some(Reason::StateAuctionBidRejected(StateAuctionBidRejected {
                         auction_id,
                         simulated_bid_lamports,
                         msg: _,
-                    })) => {
-                        return Err(Box::new(BundleRejectionError::StateAuctionBidRejected(
-                            auction_id,
-                            simulated_bid_lamports,
-                        )))
-                    }
+                    })) => return Err(Box::new(BundleRejectionError::StateAuctionBidRejected(auction_id, simulated_bid_lamports))),
                     Some(Reason::SimulationFailure(SimulationFailure { tx_signature, msg })) => {
-                        return Err(Box::new(BundleRejectionError::SimulationFailure(
-                            tx_signature,
-                            msg,
-                        )))
+                        return Err(Box::new(BundleRejectionError::SimulationFailure(tx_signature, msg)))
                     }
-                    Some(Reason::InternalError(InternalError { msg })) => {
-                        return Err(Box::new(BundleRejectionError::InternalError(msg)))
-                    }
+                    Some(Reason::InternalError(InternalError { msg })) => return Err(Box::new(BundleRejectionError::InternalError(msg))),
                     _ => {}
                 };
             }
@@ -172,9 +152,7 @@ where
 
     let futs: Vec<_> = bundle_signatures
         .iter()
-        .map(|sig| {
-            rpc_client.get_signature_status_with_commitment(sig, CommitmentConfig::processed())
-        })
+        .map(|sig| rpc_client.get_signature_status_with_commitment(sig, CommitmentConfig::processed()))
         .collect();
     let results = futures_util::future::join_all(futs).await;
     if !results.iter().all(|r| matches!(r, Ok(Some(Ok(()))))) {
@@ -202,17 +180,11 @@ where
     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::Future: std::marker::Send,
 {
     // convert them to packets + send over
-    let packets: Vec<_> = transactions
-        .iter()
-        .map(proto_packet_from_versioned_tx)
-        .collect();
+    let packets: Vec<_> = transactions.iter().map(proto_packet_from_versioned_tx).collect();
 
     searcher_client
         .send_bundle(SendBundleRequest {
-            bundle: Some(Bundle {
-                header: None,
-                packets,
-            }),
+            bundle: Some(Bundle { header: None, packets }),
         })
         .await
 }

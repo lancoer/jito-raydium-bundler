@@ -33,7 +33,6 @@ use instructions::token_instructions::*;
 use instructions::utils::*;
 
 // Define App args and commands struct
-/// Jito Raydium CPMM Bundler Cli App
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct App {
@@ -57,20 +56,27 @@ pub struct App {
 #[derive(Debug, Subcommand)]
 enum Command {
     SendBundle {
-        /// Create pool arguments
+        /// Token 0 mint address for creating pool
         token_0_mint: Pubkey,
+        /// Token 1 mint address for creating pool
         token_1_mint: Pubkey,
+        /// Token 0 mint amount for creating pool
         init_amount_0: u64,
+        /// Token 1 mint amount for creating pool
         init_amount_1: u64,
+        /// Pool open time
         #[arg(short, long, default_value_t = 0)]
         open_time: u64,
-        /// Snipe token arguments
+        /// User token vault address to swap
         user_input_token: Pubkey,
+        /// User token vault amount to swap
         user_input_amount: u64,
-        /// Disperse token to wallets arguments
+        /// User token vault address to disperse
         user_disperse_token: Pubkey,
+        /// Wallet addresses user to disperse
         #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
         disperse_wallets: Vec<Pubkey>,
+        /// Total user token amount to disperse
         disperse_amount: u64,
         /// Jito tip
         #[arg(short, long, default_value_t = 1000)]
@@ -112,7 +118,8 @@ fn load_cfg() -> Result<(ClientConfig, JitoConfig)> {
     ))
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
+// #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
+#[tokio::main]
 async fn main() {
     let (client_config, jito_config) = load_cfg().unwrap();
     if env::var("RUST_LOG").is_err() {
@@ -157,11 +164,8 @@ where
 {
     // cluster params
     let payer = read_keypair_file(&client_config.payer_path)?;
-    // solana rpc client
-    let rpc_client = solana_client::rpc_client::RpcClient::new(client_config.http_url.to_string());
     // solana non-blocking rpc clinet
-    let nonblocking_rpc_client =
-        solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(client_config.http_url.to_string(), CommitmentConfig::confirmed());
+    let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(client_config.http_url.to_string(), CommitmentConfig::confirmed());
 
     // anchor client.
     let url = Cluster::Custom(client_config.http_url.to_string(), client_config.ws_url.to_string());
@@ -192,7 +196,7 @@ where
             };
             // load account
             let load_pubkeys = vec![token_0_mint, token_1_mint];
-            let rsps = rpc_client.get_multiple_accounts(&load_pubkeys).unwrap();
+            let rsps: Vec<Option<solana_sdk::account::Account>> = rpc_client.get_multiple_accounts(&load_pubkeys).await?;
             let token_0_program = rsps[0].clone().unwrap().owner;
             let token_1_program = rsps[1].clone().unwrap().owner;
 
@@ -257,7 +261,7 @@ where
 
             // load account
             let load_pubkeys = vec![amm_config_key, token_0_mint, token_1_mint, user_input_token];
-            let rsps = rpc_client.get_multiple_accounts(&load_pubkeys)?;
+            let rsps: Vec<Option<solana_sdk::account::Account>> = rpc_client.get_multiple_accounts(&load_pubkeys).await?;
             let amm_config_account: &Option<solana_sdk::account::Account> = &rsps[0];
             let token_0_mint_account: &Option<solana_sdk::account::Account> = &rsps[1];
             let token_1_mint_account: &Option<solana_sdk::account::Account> = &rsps[2];
@@ -272,7 +276,7 @@ where
             let user_input_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_input_token_data)?;
 
             /*** prepare snipe token instructions ***/
-            let epoch = rpc_client.get_epoch_info().unwrap().epoch;
+            let epoch = rpc_client.get_epoch_info().await?.epoch;
 
             let (
                 trade_direction,
@@ -338,6 +342,7 @@ where
             let amount_received = amount_out.checked_sub(transfer_fee).unwrap();
             // calc mint out amount with slippage
             let minimum_amount_out = amount_with_slippage(amount_received, client_config.slippage, false);
+            println!("minimum_amount_out: {minimum_amount_out}");
 
             let mut snipe_token_ixs = vec![build_memo(format!("jito bundle 1: snipe token").as_bytes(), &[])];
             let create_user_output_token_instr = create_ata_token_account_instr(&client_config, spl_token::id(), &output_token_mint, &payer.pubkey())?;
@@ -376,6 +381,17 @@ where
             }
 
             /*** prepare jito ***/
+            // Get tip accounts
+            let tip_accounts: GetTipAccountsResponse = searcher_client
+                .get_tip_accounts(GetTipAccountsRequest {})
+                .await
+                .expect("gets connected leaders")
+                .into_inner();
+            let tip_accounts = tip_accounts.accounts;
+            let tip_account = Pubkey::from_str(tip_accounts[0].as_str()).unwrap();
+
+            msg!("Chosen 0# of Tip Accounts: {:?}", tip_accounts);
+
             // prepare Jito results output subscription
             let mut bundle_results_subscription = searcher_client
                 .subscribe_bundle_results(SubscribeBundleResultsRequest {})
@@ -398,49 +414,35 @@ where
             }
 
             // build + sign the transactions
-            let signers = vec![&payer];
-            let recent_hash = nonblocking_rpc_client.get_latest_blockhash().await?;
-            let tip_accounts: GetTipAccountsResponse = searcher_client
-                .get_tip_accounts(GetTipAccountsRequest {})
-                .await
-                .expect("gets connected leaders")
-                .into_inner();
-            let tip_accounts = tip_accounts.accounts;
-            let tip_account = Pubkey::from_str(tip_accounts[0].as_str()).unwrap();
-
-            msg!("Chosen 0# of Tip Accounts: {:?}", tip_accounts);
+            let blockhash = rpc_client.get_latest_blockhash().await.expect("get blockhash");
+            let signers = [&payer];
 
             send_bundle_with_confirmation(
-                &[
+                &vec![
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
                         &initialize_pool_ixs,
                         Some(&payer.pubkey()),
                         &signers,
-                        recent_hash,
+                        blockhash,
                     )),
-                    VersionedTransaction::from(Transaction::new_signed_with_payer(
-                        &snipe_token_ixs,
-                        Some(&payer.pubkey()),
-                        &signers,
-                        recent_hash,
-                    )),
+                    VersionedTransaction::from(Transaction::new_signed_with_payer(&snipe_token_ixs, Some(&payer.pubkey()), &signers, blockhash)),
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
                         &disperse_wallet_ixs,
                         Some(&payer.pubkey()),
                         &signers,
-                        recent_hash,
+                        blockhash,
                     )),
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
-                        &vec![
+                        &[
                             build_memo(format!("jito bundle 3: jito tip").as_bytes(), &[]),
                             transfer(&payer.pubkey(), &tip_account, jito_tip),
                         ],
                         Some(&payer.pubkey()),
                         &signers,
-                        recent_hash,
+                        blockhash,
                     )),
                 ],
-                &nonblocking_rpc_client,
+                &rpc_client,
                 &mut searcher_client,
                 &mut bundle_results_subscription,
             )

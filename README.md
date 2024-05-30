@@ -9,6 +9,9 @@ This is backed by Raydium CPMM instructions library.
 0. Install Rust
 1. Install `protoc`, `gcc`, `openssl`
 2. Copy over `.env.example` into `.env`, plug your RPCs (otherwise uses solana default public RPCs)
+
+   - You can set `JITO_BUNDLE_RESULT_WAIT_SECONDS=10` for extending bundle result waiting time, default is 5
+
 3. Copy over `auth.json` - JITO authentication keypair and `id.json` - the keypair with some SOL to fund the endeavour
 
    - Worring about your private key? Just use [sbjc](https://lib.rs/crates/solana-base58-json-converter) library to convert to json at ease!
@@ -28,7 +31,7 @@ JitoTip can also be adjusted using `--jito-tip [lamport]`, e.g. `--jito-tip 1000
 ```powershell
 # Mainnet (EURC / USDC)
 # cargo run send-bundle -h or --help to see inputs
-cargo run --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 100000000 100 <USDC token> 1 <EURC token> 10 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+cargo run -- --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 100000000 100 <USDC token> 1 <EURC token> 10 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
 # Note: Don't provide --keypair-path argument if not planning to use authentication
 ```
 
@@ -41,6 +44,6 @@ cargo run send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr 4zMMC9srt5Ri5
 
 ## Devnet
 
-In order for test or simulate cases, you need to add `'devnet'` feature to `raydium-cp-swap` library in [Cargo.toml](./cli/Cargo.toml)
+In order for test or simulate cases, you need to add `"devnet"` feature to `raydium-cp-swap` library in [Cargo.toml](./cli/Cargo.toml)
 
 And ensure you've set devnet url and testnet url for solana & raydium and jito cli in [.env](.env)
