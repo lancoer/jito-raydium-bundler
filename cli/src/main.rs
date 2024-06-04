@@ -1,7 +1,4 @@
-mod instructions;
-
 use std::env;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,27 +7,21 @@ use anyhow::{format_err, Ok, Result};
 use clap::{Parser, Subcommand};
 use dotenv_codegen::dotenv;
 
-use anchor_client::{Client, Cluster};
 use jito_protos::searcher::searcher_service_client::SearcherServiceClient;
 use jito_protos::searcher::{GetTipAccountsRequest, SubscribeBundleResultsRequest};
 use jito_protos::searcher::{GetTipAccountsResponse, NextScheduledLeaderRequest};
 use jito_searcher_client::send_bundle_with_confirmation;
 use jito_searcher_client::{get_searcher_client_auth, get_searcher_client_no_auth};
+use raydium_library::amm;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::system_instruction::transfer;
 use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::{pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction};
-use spl_memo::{build_memo, solana_program::msg};
-use spl_token_2022::{extension::StateWithExtensionsMut, state::*};
 
 use tokio::time::sleep;
 use tonic::codegen::{Body, Bytes, StdError};
 
 use env_logger::TimestampPrecision;
-
-use instructions::amm_instructions::*;
-use instructions::token_instructions::*;
-use instructions::utils::*;
 
 // Define App args and commands struct
 #[derive(Parser, Debug)]
@@ -55,51 +46,26 @@ pub struct App {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Snipe {
-        /// Token 0 mint address for creating pool
-        token_0_mint: Pubkey,
-        /// Token 1 mint address for creating pool
-        token_1_mint: Pubkey,
-        /// Token 0 mint amount for creating pool
-        init_amount_0: u64,
-        /// Token 1 mint amount for creating pool
-        init_amount_1: u64,
-        /// Pool open time
-        #[arg(short, long, default_value_t = 0)]
-        open_time: u64,
-        /// User token vault address to swap
-        user_input_token: Pubkey,
-        /// Minimal user token vault amount to get from swap
-        user_amount_out_less_fee: u64,
-        /// User token vault address to disperse
-        user_disperse_token: Pubkey,
-        /// Wallet addresses user to disperse
-        #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
-        disperse_wallets: Vec<Pubkey>,
-        /// Total user token amount to disperse
-        disperse_amount: u64,
-        /// Jito tip
-        #[arg(short, long, default_value_t = 1000)]
-        jito_tip: u64,
-    },
     SendBundle {
-        /// Token 0 mint address for creating pool
-        token_0_mint: Pubkey,
-        /// Token 1 mint address for creating pool
-        token_1_mint: Pubkey,
-        /// Token 0 mint amount for creating pool
-        init_amount_0: u64,
-        /// Token 1 mint amount for creating pool
-        init_amount_1: u64,
+        /// Openbook market address
+        market: Pubkey,
+        /// Token base mint address for creating pool (e.g <WSOL mint>)
+        token_base_mint: Pubkey,
+        /// Token quote mint address for creating pool (e.g <USDC mint>)
+        token_quote_mint: Pubkey,
+        /// Base token mint amount for creating pool
+        init_base_amount: u64,
+        /// Quote token mint amount for creating pool
+        init_quote_amount: u64,
         /// Pool open time
         #[arg(short, long, default_value_t = 0)]
         open_time: u64,
-        /// User token vault address to swap
-        user_input_token: Pubkey,
-        /// Minimal user token vault amount to get from swap
-        user_amount_out_less_fee: u64,
-        /// User token vault address to disperse
-        user_disperse_token: Pubkey,
+        /// User token mint address to swap
+        input_token_mint: Pubkey,
+        /// Token amount user want to get from swap
+        amount_specified: u64,
+        /// User token mint address to disperse
+        disperse_token_mint: Pubkey,
         /// Wallet addresses user to disperse
         #[clap(short, long, value_parser, num_args = 1.., value_delimiter = ' ')]
         disperse_wallets: Vec<Pubkey>,
@@ -114,11 +80,12 @@ enum Command {
 // Dotenv config structs
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClientConfig {
-    http_url: String,
-    ws_url: String,
-    payer_path: String,
-    raydium_cp_program: Pubkey,
-    slippage: f64,
+    cluster_url: String,
+    wallet_path: String,
+    openbook_market_program: Pubkey,
+    raydium_amm_program: Pubkey,
+    create_fee_destination: Pubkey,
+    slippage_bps: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,11 +100,12 @@ fn read_keypair_file(s: &str) -> Result<Keypair> {
 fn load_cfg() -> Result<(ClientConfig, JitoConfig)> {
     Ok((
         ClientConfig {
-            http_url: dotenv!("HTTP_URL").to_string(),
-            ws_url: dotenv!("WS_URL").to_string(),
-            payer_path: dotenv!("PAYER_PATH").to_string(),
-            raydium_cp_program: Pubkey::from_str(dotenv!("RAYDIUM_CP_PROGRAM")).unwrap(),
-            slippage: f64::from_str(dotenv!("SLIPPAGE")).unwrap(),
+            cluster_url: dotenv!("CLUSTER_URL").to_string(),
+            wallet_path: dotenv!("WALLET_PATH").to_string(),
+            openbook_market_program: Pubkey::from_str(dotenv!("OPENBOOK_MARKET_PROGRAM")).unwrap(),
+            raydium_amm_program: Pubkey::from_str(dotenv!("RAYDIUM_AMM_PROGRAM")).unwrap(),
+            create_fee_destination: Pubkey::from_str(dotenv!("CREATE_FEE_DESTINATION")).unwrap(),
+            slippage_bps: u64::from_str(dotenv!("SLIPPAGE_BPS")).unwrap(),
         },
         JitoConfig {
             block_engine_url: dotenv!("BLOCK_ENGINE_URL").to_string(),
@@ -189,451 +157,145 @@ where
     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::Future: std::marker::Send,
 {
     // cluster params
-    let payer = read_keypair_file(&client_config.payer_path)?;
+    let wallet = read_keypair_file(&client_config.wallet_path).map_err(|_| format_err!("failed to read keypair from {}", client_config.wallet_path))?;
+    // solana rpc client
+    let rpc_client = solana_client::rpc_client::RpcClient::new(client_config.cluster_url.to_string());
     // solana non-blocking rpc clinet
-    let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(client_config.http_url.to_string(), CommitmentConfig::confirmed());
+    let nonblocking_rpc_client =
+        solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(client_config.cluster_url.to_string(), CommitmentConfig::confirmed());
 
-    // anchor client.
-    let url = Cluster::Custom(client_config.http_url.to_string(), client_config.ws_url.to_string());
-    let wallet = read_keypair_file(&client_config.payer_path)?;
-    let anchor_client = Client::new(url, Rc::new(wallet));
-    let program = anchor_client.program(client_config.raydium_cp_program)?;
+    println!();
 
     match app.command {
-        Command::Snipe {
-            token_0_mint,
-            token_1_mint,
-            init_amount_0,
-            init_amount_1,
-            open_time,
-            user_input_token,
-            user_amount_out_less_fee,
-            user_disperse_token,
-            disperse_wallets,
-            disperse_amount,
-            jito_tip,
-        } => {
-            /*** prepare create pool instructions ***/
-            // ensure pool uniqueness
-            let (token_0_mint, token_1_mint, init_amount_0, init_amount_1) = if token_0_mint > token_1_mint {
-                (token_1_mint, token_0_mint, init_amount_1, init_amount_0)
-            } else {
-                (token_0_mint, token_1_mint, init_amount_0, init_amount_1)
-            };
-
-            /*** Calculate arguments for a new pool ***/
-            // Calculate Pool id
-            let amm_config_index = 0u16;
-            let (amm_config_key, __bump) = Pubkey::find_program_address(
-                &[raydium_cp_swap::states::config::AMM_CONFIG_SEED.as_bytes(), &amm_config_index.to_be_bytes()],
-                &program.id(),
-            );
-
-            let (pool_account_key, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_SEED.as_bytes(),
-                    amm_config_key.to_bytes().as_ref(),
-                    token_0_mint.to_bytes().as_ref(),
-                    token_1_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (token_0_vault, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                    token_0_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (token_1_vault, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                    token_1_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (observation_key, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::oracle::OBSERVATION_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            println!(
-                "\npool_id: {pool_account_key}\ntoken_0_vault: {token_0_vault} , token_1_vault: {token_1_vault}\nobservation_account: {observation_key}\n"
-            );
-
-            // load account
-            let load_pubkeys = [amm_config_key, token_0_mint, token_1_mint, user_input_token, user_disperse_token];
-            let rsps: Vec<Option<solana_sdk::account::Account>> = rpc_client.get_multiple_accounts(&load_pubkeys).await?;
-            let amm_config_account: &Option<solana_sdk::account::Account> = &rsps[0];
-            let token_0_mint_account: &Option<solana_sdk::account::Account> = &rsps[1];
-            let token_1_mint_account: &Option<solana_sdk::account::Account> = &rsps[2];
-            let user_input_token_account: &Option<solana_sdk::account::Account> = &rsps[3];
-            let user_disperse_token_account: &Option<solana_sdk::account::Account> = &rsps[4];
-            // docode account
-            let token_0_mint_program = token_0_mint_account.clone().unwrap().owner;
-            let token_1_mint_program = token_1_mint_account.clone().unwrap().owner;
-            let mut token_0_mint_data = token_0_mint_account.clone().unwrap().data;
-            let mut token_1_mint_data = token_1_mint_account.clone().unwrap().data;
-            let mut user_input_token_data = user_input_token_account.clone().unwrap().data;
-            let user_disperse_token_program = user_disperse_token_account.clone().unwrap().owner;
-            let mut user_disperse_token_data = user_disperse_token_account.clone().unwrap().data;
-            let amm_config_state = deserialize_anchor_account::<raydium_cp_swap::states::AmmConfig>(amm_config_account.as_ref().unwrap())?;
-            let token_0_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_0_mint_data)?;
-            let token_1_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_1_mint_data)?;
-            let user_input_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_input_token_data)?;
-            let user_disperse_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_disperse_token_data)?;
-
-            let mut ixs = vec![build_memo(format!("jito bundle 0: initialize pool").as_bytes(), &[])];
-            ixs.extend(initialize_pool_instr(
-                &client_config,
-                token_0_mint,
-                token_1_mint,
-                token_0_mint_program,
-                token_1_mint_program,
-                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
-                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
-                raydium_cp_swap::create_pool_fee_reveiver::id(),
-                init_amount_0,
-                init_amount_1,
-                open_time,
-            )?);
-
-            /*** prepare snipe token instructions ***/
-            let epoch = rpc_client.get_epoch_info().await?.epoch;
-
-            let (
-                trade_direction,
-                total_input_token_amount,
-                total_output_token_amount,
-                user_input_token,
-                user_output_token,
-                input_vault,
-                output_vault,
-                input_token_mint,
-                output_token_mint,
-                input_token_program,
-                output_token_program,
-                out_transfer_fee,
-            ) = if user_input_token_info.base.mint == token_0_mint {
-                (
-                    raydium_cp_swap::curve::TradeDirection::ZeroForOne,
-                    init_amount_0,
-                    init_amount_1,
-                    user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
-                    token_0_vault,
-                    token_1_vault,
-                    token_0_mint,
-                    token_1_mint,
-                    token_0_mint_program,
-                    token_1_mint_program,
-                    get_transfer_inverse_fee(&token_1_mint_info, epoch, user_amount_out_less_fee),
-                )
-            } else {
-                (
-                    raydium_cp_swap::curve::TradeDirection::OneForZero,
-                    init_amount_1,
-                    init_amount_0,
-                    user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
-                    token_1_vault,
-                    token_0_vault,
-                    token_1_mint,
-                    token_0_mint,
-                    token_1_mint_program,
-                    token_0_mint_program,
-                    get_transfer_inverse_fee(&token_0_mint_info, epoch, user_amount_out_less_fee),
-                )
-            };
-            let actual_amount_out = user_amount_out_less_fee.checked_add(out_transfer_fee).unwrap();
-
-            let result = raydium_cp_swap::curve::CurveCalculator::swap_base_output(
-                u128::from(actual_amount_out),
-                u128::from(total_input_token_amount),
-                u128::from(total_output_token_amount),
-                amm_config_state.trade_fee_rate,
-                amm_config_state.protocol_fee_rate,
-                amm_config_state.fund_fee_rate,
-            )
-            .ok_or(raydium_cp_swap::error::ErrorCode::ZeroTradingTokens)
-            .unwrap();
-
-            let source_amount_swapped = u64::try_from(result.source_amount_swapped).unwrap();
-            let amount_in_transfer_fee = match trade_direction {
-                raydium_cp_swap::curve::TradeDirection::ZeroForOne => get_transfer_inverse_fee(&token_0_mint_info, epoch, source_amount_swapped),
-                raydium_cp_swap::curve::TradeDirection::OneForZero => get_transfer_inverse_fee(&token_1_mint_info, epoch, source_amount_swapped),
-            };
-
-            let input_transfer_amount = source_amount_swapped.checked_add(amount_in_transfer_fee).unwrap();
-            // calc max in with slippage
-            let max_amount_in = amount_with_slippage(input_transfer_amount, client_config.slippage, true);
-            println!("max_amount_in: {max_amount_in}");
-
-            ixs.extend(vec![build_memo(format!("jito bundle 1: snipe token").as_bytes(), &[])]);
-            let user_output_token_pubkey = spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &output_token_mint);
-            if !rpc_client.get_account(&user_output_token_pubkey).await.is_ok() {
-                let create_user_output_token_instr = create_ata_token_account_instr(&client_config, output_token_program, &output_token_mint, &payer.pubkey())?;
-                ixs.extend(create_user_output_token_instr);
-            }
-            let swap_base_out_instr = swap_base_output_instr(
-                &client_config,
-                pool_account_key,
-                amm_config_key,
-                observation_key,
-                user_input_token,
-                user_output_token,
-                input_vault,
-                output_vault,
-                input_token_mint,
-                output_token_mint,
-                input_token_program,
-                output_token_program,
-                max_amount_in,
-                user_amount_out_less_fee,
-            )?;
-            ixs.extend(swap_base_out_instr);
-
-            // build + sign the transactions
-            let (blockhash, _) = rpc_client
-                .get_latest_blockhash_with_commitment(CommitmentConfig::finalized())
-                .await
-                .expect("get blockhash");
-            let signers = [&payer];
-
-            let txn = Transaction::new_signed_with_payer(&ixs, Some(&payer.pubkey()), &signers, blockhash);
-            let signature = rpc_client
-                .send_and_confirm_transaction_with_spinner_and_config(
-                    &txn,
-                    CommitmentConfig::confirmed(),
-                    solana_client::rpc_config::RpcSendTransactionConfig {
-                        skip_preflight: true,
-                        ..solana_client::rpc_config::RpcSendTransactionConfig::default()
-                    },
-                )
-                .await?;
-            println!("{}", signature);
-        }
         Command::SendBundle {
-            token_0_mint,
-            token_1_mint,
-            init_amount_0,
-            init_amount_1,
+            market,
+            token_base_mint,
+            token_quote_mint,
+            init_base_amount,
+            init_quote_amount,
             open_time,
-            user_input_token,
-            user_amount_out_less_fee,
-            user_disperse_token,
+            input_token_mint,
+            amount_specified,
+            disperse_token_mint,
             disperse_wallets,
             disperse_amount,
             jito_tip,
         } => {
-            /*** prepare create pool instructions ***/
-            // ensure pool uniqueness
-            let (token_0_mint, token_1_mint, init_amount_0, init_amount_1) = if token_0_mint > token_1_mint {
-                (token_1_mint, token_0_mint, init_amount_1, init_amount_0)
-            } else {
-                (token_0_mint, token_1_mint, init_amount_0, init_amount_1)
-            };
-
-            /*** Calculate arguments for a new pool ***/
-            // Calculate Pool id
-            let amm_config_index = 0u16;
-            let (amm_config_key, __bump) = Pubkey::find_program_address(
-                &[raydium_cp_swap::states::config::AMM_CONFIG_SEED.as_bytes(), &amm_config_index.to_be_bytes()],
-                &program.id(),
-            );
-
-            let (pool_account_key, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_SEED.as_bytes(),
-                    amm_config_key.to_bytes().as_ref(),
-                    token_0_mint.to_bytes().as_ref(),
-                    token_1_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (token_0_vault, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                    token_0_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (token_1_vault, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::pool::POOL_VAULT_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                    token_1_mint.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            let (observation_key, __bump) = Pubkey::find_program_address(
-                &[
-                    raydium_cp_swap::states::oracle::OBSERVATION_SEED.as_bytes(),
-                    pool_account_key.to_bytes().as_ref(),
-                ],
-                &program.id(),
-            );
-            println!(
-                "\npool_id: {pool_account_key}\ntoken_0_vault: {token_0_vault} , token_1_vault: {token_1_vault}\nobservation_account: {observation_key}\n"
-            );
-
-            // load account
-            let load_pubkeys = [amm_config_key, token_0_mint, token_1_mint, user_input_token, user_disperse_token];
-            let rsps: Vec<Option<solana_sdk::account::Account>> = rpc_client.get_multiple_accounts(&load_pubkeys).await?;
-            let amm_config_account: &Option<solana_sdk::account::Account> = &rsps[0];
-            let token_0_mint_account: &Option<solana_sdk::account::Account> = &rsps[1];
-            let token_1_mint_account: &Option<solana_sdk::account::Account> = &rsps[2];
-            let user_input_token_account: &Option<solana_sdk::account::Account> = &rsps[3];
-            let user_disperse_token_account: &Option<solana_sdk::account::Account> = &rsps[4];
-            // docode account
-            let token_0_mint_program = token_0_mint_account.clone().unwrap().owner;
-            let token_1_mint_program = token_1_mint_account.clone().unwrap().owner;
-            let mut token_0_mint_data = token_0_mint_account.clone().unwrap().data;
-            let mut token_1_mint_data = token_1_mint_account.clone().unwrap().data;
-            let mut user_input_token_data = user_input_token_account.clone().unwrap().data;
-            let user_disperse_token_program = user_disperse_token_account.clone().unwrap().owner;
-            let mut user_disperse_token_data = user_disperse_token_account.clone().unwrap().data;
-            let amm_config_state = deserialize_anchor_account::<raydium_cp_swap::states::AmmConfig>(amm_config_account.as_ref().unwrap())?;
-            let token_0_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_0_mint_data)?;
-            let token_1_mint_info = StateWithExtensionsMut::<Mint>::unpack(&mut token_1_mint_data)?;
-            let user_input_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_input_token_data)?;
-            let user_disperse_token_info = StateWithExtensionsMut::<Account>::unpack(&mut user_disperse_token_data)?;
-
-            let mut initialize_pool_ixs = vec![build_memo(format!("jito bundle 0: initialize pool").as_bytes(), &[])];
-            initialize_pool_ixs.extend(initialize_pool_instr(
-                &client_config,
-                token_0_mint,
-                token_1_mint,
-                token_0_mint_program,
-                token_1_mint_program,
-                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
-                spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
-                raydium_cp_swap::create_pool_fee_reveiver::id(),
-                init_amount_0,
-                init_amount_1,
-                open_time,
-            )?);
-
-            /*** prepare snipe token instructions ***/
-            let epoch = rpc_client.get_epoch_info().await?.epoch;
-
-            let (
-                trade_direction,
-                total_input_token_amount,
-                total_output_token_amount,
-                user_input_token,
-                user_output_token,
-                input_vault,
-                output_vault,
-                input_token_mint,
-                output_token_mint,
-                input_token_program,
-                output_token_program,
-                out_transfer_fee,
-            ) = if user_input_token_info.base.mint == token_0_mint {
-                (
-                    raydium_cp_swap::curve::TradeDirection::ZeroForOne,
-                    init_amount_0,
-                    init_amount_1,
-                    user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_1_mint),
-                    token_0_vault,
-                    token_1_vault,
-                    token_0_mint,
-                    token_1_mint,
-                    token_0_mint_program,
-                    token_1_mint_program,
-                    get_transfer_inverse_fee(&token_1_mint_info, epoch, user_amount_out_less_fee),
-                )
-            } else {
-                (
-                    raydium_cp_swap::curve::TradeDirection::OneForZero,
-                    init_amount_1,
-                    init_amount_0,
-                    user_input_token,
-                    spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &token_0_mint),
-                    token_1_vault,
-                    token_0_vault,
-                    token_1_mint,
-                    token_0_mint,
-                    token_1_mint_program,
-                    token_0_mint_program,
-                    get_transfer_inverse_fee(&token_0_mint_info, epoch, user_amount_out_less_fee),
-                )
-            };
-            let actual_amount_out = user_amount_out_less_fee.checked_add(out_transfer_fee).unwrap();
-
-            let result = raydium_cp_swap::curve::CurveCalculator::swap_base_output(
-                u128::from(actual_amount_out),
-                u128::from(total_input_token_amount),
-                u128::from(total_output_token_amount),
-                amm_config_state.trade_fee_rate,
-                amm_config_state.protocol_fee_rate,
-                amm_config_state.fund_fee_rate,
-            )
-            .ok_or(raydium_cp_swap::error::ErrorCode::ZeroTradingTokens)
-            .unwrap();
-
-            let source_amount_swapped = u64::try_from(result.source_amount_swapped).unwrap();
-            let amount_in_transfer_fee = match trade_direction {
-                raydium_cp_swap::curve::TradeDirection::ZeroForOne => get_transfer_inverse_fee(&token_0_mint_info, epoch, source_amount_swapped),
-                raydium_cp_swap::curve::TradeDirection::OneForZero => get_transfer_inverse_fee(&token_1_mint_info, epoch, source_amount_swapped),
-            };
-
-            let input_transfer_amount = source_amount_swapped.checked_add(amount_in_transfer_fee).unwrap();
-            // calc max in with slippage
-            let max_amount_in = amount_with_slippage(input_transfer_amount, client_config.slippage, true);
-            println!("max_amount_in: {max_amount_in}");
-
-            let mut snipe_token_ixs = vec![build_memo(format!("jito bundle 1: snipe token").as_bytes(), &[])];
-            let user_output_token_pubkey = spl_associated_token_account::get_associated_token_address(&payer.pubkey(), &output_token_mint);
-            if !rpc_client.get_account(&user_output_token_pubkey).await.is_ok() {
-                let create_user_output_token_instr = create_ata_token_account_instr(&client_config, output_token_program, &output_token_mint, &payer.pubkey())?;
-                snipe_token_ixs.extend(create_user_output_token_instr);
-            }
-            let swap_base_out_instr = swap_base_output_instr(
-                &client_config,
-                pool_account_key,
-                amm_config_key,
-                observation_key,
-                user_input_token,
-                user_output_token,
-                input_vault,
-                output_vault,
-                input_token_mint,
-                output_token_mint,
-                input_token_program,
-                output_token_program,
-                max_amount_in,
-                user_amount_out_less_fee,
+            /*** parepare initialize pool instructions ***/
+            // generate amm keys
+            let amm_keys = amm::utils::get_amm_pda_keys(
+                &client_config.raydium_amm_program,
+                &client_config.openbook_market_program,
+                &market,
+                &token_base_mint,
+                &token_quote_mint,
             )?;
-            snipe_token_ixs.extend(swap_base_out_instr);
+
+            // build initialize instruction
+            let build_init_instruction = amm::instructions::initialize_amm_pool(
+                &client_config.raydium_amm_program,
+                &amm_keys,
+                &client_config.create_fee_destination,
+                &wallet.pubkey(),
+                &spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &amm_keys.amm_coin_mint),
+                &spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &amm_keys.amm_pc_mint),
+                &spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &amm_keys.amm_lp_mint),
+                open_time,
+                init_quote_amount,
+                init_base_amount,
+            )?;
+
+            /*** parepare snipe token instructions ***/
+            // load market keys
+            let market_keys = amm::openbook::get_keys_for_market(&rpc_client, &amm_keys.market_program, &amm_keys.market)?;
+
+            // prepare swap instruction
+            let (direction, output_token_mint) = if input_token_mint == amm_keys.amm_coin_mint {
+                (amm::utils::SwapDirection::Coin2PC, amm_keys.amm_pc_mint)
+            } else {
+                (amm::utils::SwapDirection::PC2Coin, amm_keys.amm_coin_mint)
+            };
+            // swap_fee_numberator and swap_fee_denominator default values are specified at
+            // https://github.com/raydium-io/raydium-amm/blob/ae039d21cd49ef670d76b3a1cf5485ae0213dc5e/program/src/state.rs#L503
+            //
+            let other_amount_threshold = amm::swap_with_slippage(
+                init_quote_amount,
+                init_base_amount,
+                25,
+                10_1000,
+                direction,
+                amount_specified,
+                false,
+                client_config.slippage_bps,
+            )?;
+            println!("other_amount_threshold: {other_amount_threshold}");
+
+            // build swap instruction
+            let build_swap_instruction = amm::instructions::swap(
+                &client_config.raydium_amm_program,
+                &amm_keys,
+                &market_keys,
+                &wallet.pubkey(),
+                &spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &input_token_mint),
+                &spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &output_token_mint),
+                amount_specified,
+                other_amount_threshold,
+                false,
+            )?;
 
             /*** prepare disperse token to wallets instructions ***/
+            // load account
+            let user_disperse_token_account = spl_associated_token_account::get_associated_token_address(&wallet.pubkey(), &disperse_token_mint);
+            let load_pubkeys = [user_disperse_token_account];
+            let rsps: Vec<Option<solana_sdk::account::Account>> = nonblocking_rpc_client.get_multiple_accounts(&load_pubkeys).await?;
+            let disperse_token_program = rsps[0].clone().unwrap().owner;
+
             // calculate the amount to disperse to each wallet
             let disperse_each_amount = disperse_amount / u64::try_from(disperse_wallets.len())?;
+            println!("disperse_each_amount: {disperse_each_amount}\n");
 
-            let mut disperse_wallet_ixs = vec![build_memo(format!("jito bundle 2: disperse token to wallets").as_bytes(), &[])];
+            let mut disperse_wallet_ixs = vec![];
             for disperse_wallet in disperse_wallets {
-                let dispserse_token_pubkey = spl_associated_token_account::get_associated_token_address(&disperse_wallet, &user_disperse_token_info.base.mint);
-                if !rpc_client.get_account(&dispserse_token_pubkey).await.is_ok() {
-                    let create_disperse_token_instr = create_ata_token_account_instr(
-                        &client_config,
-                        user_disperse_token_program,
-                        &user_disperse_token_info.base.mint,
+                let dispserse_token_pubkey = spl_associated_token_account::get_associated_token_address(&disperse_wallet, &disperse_token_mint);
+                if !nonblocking_rpc_client.get_account(&dispserse_token_pubkey).await.is_ok() {
+                    let create_disperse_token_instr = spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                        &wallet.pubkey(),
                         &disperse_wallet,
-                    )?;
-                    disperse_wallet_ixs.extend(create_disperse_token_instr);
+                        &disperse_token_mint,
+                        &disperse_token_program,
+                    );
+                    disperse_wallet_ixs.extend([create_disperse_token_instr]);
                 }
-                let transfer_token_instr =
-                    spl_token_transfer_instr(&client_config, &user_disperse_token, &dispserse_token_pubkey, disperse_each_amount, &payer)?;
-                disperse_wallet_ixs.extend(transfer_token_instr);
+                let transfer_token_instr = spl_token::instruction::transfer(
+                    &disperse_token_program,
+                    &user_disperse_token_account,
+                    &dispserse_token_pubkey,
+                    &wallet.pubkey(),
+                    &[],
+                    disperse_each_amount,
+                )?;
+                disperse_wallet_ixs.extend([transfer_token_instr]);
             }
+
+            // // build + sign the transactions
+            // let (blockhash, _) = nonblocking_rpc_client
+            //     .get_latest_blockhash_with_commitment(CommitmentConfig::finalized())
+            //     .await
+            //     .expect("get blockhash");
+            // let signers = [&wallet];
+
+            // let txn = Transaction::new_signed_with_payer(&ixs, Some(&wallet.pubkey()), &signers, blockhash);
+            // let signature = nonblocking_rpc_client
+            //     .send_and_confirm_transaction_with_spinner_and_config(
+            //         &txn,
+            //         CommitmentConfig::confirmed(),
+            //         solana_client::rpc_config::RpcSendTransactionConfig {
+            //             skip_preflight: true,
+            //             ..solana_client::rpc_config::RpcSendTransactionConfig::default()
+            //         },
+            //     )
+            //     .await?;
+            // println!("{}", signature);
 
             /*** prepare jito ***/
             // Get tip accounts
@@ -645,7 +307,7 @@ where
             let tip_accounts = tip_accounts.accounts;
             let tip_account = Pubkey::from_str(tip_accounts[0].as_str()).unwrap();
 
-            msg!("Chosen #0 of Tip Accounts: {:?}\n", tip_accounts);
+            println!("Chosen #0 of Tip Accounts: {:?}\n", tip_accounts);
 
             // prepare Jito results output subscription
             let mut bundle_results_subscription = searcher_client
@@ -664,52 +326,45 @@ where
                     .into_inner();
                 let num_slots = next_leader.next_leader_slot - next_leader.current_slot;
                 is_leader_slot = num_slots <= 2;
-                msg!("next jito leader slot in {num_slots} slots in {}", next_leader.next_leader_region);
+                println!("next jito leader slot in {num_slots} slots in {}", next_leader.next_leader_region);
                 sleep(Duration::from_millis(500)).await;
             }
 
             // build + sign the transactions
-            let (blockhash, _) = rpc_client
+            let (blockhash, _) = nonblocking_rpc_client
                 .get_latest_blockhash_with_commitment(CommitmentConfig::finalized())
                 .await
                 .expect("get blockhash");
-            let signers = [&payer];
+            let signers = [&wallet];
 
             send_bundle_with_confirmation(
                 &[
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
-                        &initialize_pool_ixs,
-                        Some(&payer.pubkey()),
-                        &signers,
-                        blockhash,
-                    )),
-                    VersionedTransaction::from(Transaction::new_signed_with_payer(&snipe_token_ixs, Some(&payer.pubkey()), &signers, blockhash)),
-                    // VersionedTransaction::from(Transaction::new_signed_with_payer(
-                    //     &disperse_wallet_ixs,
-                    //     Some(&payer.pubkey()),
-                    //     &signers,
-                    //     blockhash,
-                    // )),
-                    VersionedTransaction::from(Transaction::new_signed_with_payer(
-                        &[
-                            build_memo(format!("jito bundle 2.5: this is a failure transaction").as_bytes(), &[]),
-                            transfer(&payer.pubkey(), &payer.pubkey(), 10000_000_000_000),
-                        ],
-                        Some(&payer.pubkey()),
+                        &[build_init_instruction],
+                        Some(&wallet.pubkey()),
                         &signers,
                         blockhash,
                     )),
                     VersionedTransaction::from(Transaction::new_signed_with_payer(
-                        &[
-                            build_memo(format!("jito bundle 3: jito tip").as_bytes(), &[]),
-                            transfer(&payer.pubkey(), &tip_account, jito_tip),
-                        ],
-                        Some(&payer.pubkey()),
+                        &[build_swap_instruction],
+                        Some(&wallet.pubkey()),
+                        &signers,
+                        blockhash,
+                    )),
+                    VersionedTransaction::from(Transaction::new_signed_with_payer(
+                        &disperse_wallet_ixs,
+                        Some(&wallet.pubkey()),
+                        &signers,
+                        blockhash,
+                    )),
+                    VersionedTransaction::from(Transaction::new_signed_with_payer(
+                        &[transfer(&wallet.pubkey(), &tip_account, jito_tip)],
+                        Some(&wallet.pubkey()),
                         &signers,
                         blockhash,
                     )),
                 ],
-                &rpc_client,
+                &nonblocking_rpc_client,
                 &mut searcher_client,
                 &mut bundle_results_subscription,
             )

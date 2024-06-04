@@ -1,8 +1,8 @@
-# JITO-RAYDIUM-CPMM-BUNDLER
+# JITO-RAYDIUM-AMM-BUNDLER
 
-Jito Raydium CPMM Bundler is a new bundler that deposit liquidity pool, snipe base token and disperse to wallets at ease using Jito CLI.
+Jito Raydium AMM Bundler is a new bundler that deposit liquidity pool, snipe base token and disperse to wallets at ease using Jito CLI.
 
-This is backed by Raydium CPMM instructions library.
+This is backed by Raydium AMM instructions library.
 
 ## Requirements
 
@@ -31,19 +31,17 @@ JitoTip can also be adjusted using `--jito-tip [lamport]`, e.g. `--jito-tip 1000
 ```powershell
 # Mainnet (EURC / WSOL)
 # cargo run send-bundle -h or --help to see inputs
-cargo run -- --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr So11111111111111111111111111111111111111112 1000000000000000000 100000000 <WSOL token> 800000000000000000 <EURC token> 300000000 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+cargo run -- --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr So11111111111111111111111111111111111111112 1000000000000000000 100000000 <WSOL mint> 800000000000000000 <EURC mint> 300000000 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
 # Note: Don't provide --keypair-path argument if not planning to use authentication
 ```
 
 ```powershell
 # Testnet (USDC-Dev / WSOL)
 # cargo run send-bundle -h or --help to see inputs
-cargo run send-bundle Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr So11111111111111111111111111111111111111112 1000000000000000 100000000 EfG44HibCCbURqpWnhFfcAvSETKg1ezx6FvufPo8xF2o 800000000000000 FoGowrRGnpupeLyHZjPv96gtUaHcXM6tgrtsR17U8rC6 300000000 --disperse-wallets B1mrQSpdeMU9gCvkJ6VsXVVoYjRGkNA7TtjMyqxrhecH
+cargo run send-bundle 4i79W4hgqjdtV9a3dX7DCNdeBaxRRGtKCj67E7aWBRWz Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr So11111111111111111111111111111111111111112 1000000000000000 100000000 So11111111111111111111111111111111111111112 800000000000000 Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr 1000000000000000000 --disperse-wallets B1mrQSpdeMU9gCvkJ6VsXVVoYjRGkNA7TtjMyqxrhecH
 # Note: Don't provide --keypair-path argument if not planning to use authentication
 ```
 
 ## Devnet
 
-In order for test or simulate cases, you need to add `"devnet"` feature to `raydium-cp-swap` library in [Cargo.toml](./cli/Cargo.toml)
-
-And ensure you've set devnet url and testnet url for solana & raydium and jito cli in [.env](.env)
+And ensure you've set devnet url and testnet url for solana, openbook, raydium and jito cli in [.env](.env)
