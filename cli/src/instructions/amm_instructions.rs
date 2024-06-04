@@ -195,53 +195,7 @@ pub fn initialize_pool_instr(
 //     Ok(instructions)
 // }
 
-pub fn swap_base_input_instr(
-    config: &ClientConfig,
-    pool_id: Pubkey,
-    amm_config: Pubkey,
-    observation_account: Pubkey,
-    input_token_account: Pubkey,
-    output_token_account: Pubkey,
-    input_vault: Pubkey,
-    output_vault: Pubkey,
-    input_token_mint: Pubkey,
-    output_token_mint: Pubkey,
-    input_token_program: Pubkey,
-    output_token_program: Pubkey,
-    amount_in: u64,
-    minimum_amount_out: u64,
-) -> Result<Vec<Instruction>> {
-    let payer = read_keypair_file(&config.payer_path)?;
-    let url = Cluster::Custom(config.http_url.clone(), config.ws_url.clone());
-    // Client.
-    let client = Client::new(url, Rc::new(payer));
-    let program = client.program(config.raydium_cp_program)?;
-
-    let (authority, __bump) = Pubkey::find_program_address(&[AUTH_SEED.as_bytes()], &program.id());
-
-    let instructions = program
-        .request()
-        .accounts(raydium_cp_accounts::Swap {
-            payer: program.payer(),
-            authority,
-            amm_config,
-            pool_state: pool_id,
-            input_token_account,
-            output_token_account,
-            input_vault,
-            output_vault,
-            input_token_program,
-            output_token_program,
-            input_token_mint,
-            output_token_mint,
-            observation_state: observation_account,
-        })
-        .args(raydium_cp_instructions::SwapBaseInput { amount_in, minimum_amount_out })
-        .instructions()?;
-    Ok(instructions)
-}
-
-// pub fn swap_base_output_instr(
+// pub fn swap_base_input_instr(
 //     config: &ClientConfig,
 //     pool_id: Pubkey,
 //     amm_config: Pubkey,
@@ -254,8 +208,8 @@ pub fn swap_base_input_instr(
 //     output_token_mint: Pubkey,
 //     input_token_program: Pubkey,
 //     output_token_program: Pubkey,
-//     max_amount_in: u64,
-//     amount_out: u64,
+//     amount_in: u64,
+//     minimum_amount_out: u64,
 // ) -> Result<Vec<Instruction>> {
 //     let payer = read_keypair_file(&config.payer_path)?;
 //     let url = Cluster::Custom(config.http_url.clone(), config.ws_url.clone());
@@ -282,7 +236,53 @@ pub fn swap_base_input_instr(
 //             output_token_mint,
 //             observation_state: observation_account,
 //         })
-//         .args(raydium_cp_instructions::SwapBaseOutput { max_amount_in, amount_out })
+//         .args(raydium_cp_instructions::SwapBaseInput { amount_in, minimum_amount_out })
 //         .instructions()?;
 //     Ok(instructions)
 // }
+
+pub fn swap_base_output_instr(
+    config: &ClientConfig,
+    pool_id: Pubkey,
+    amm_config: Pubkey,
+    observation_account: Pubkey,
+    input_token_account: Pubkey,
+    output_token_account: Pubkey,
+    input_vault: Pubkey,
+    output_vault: Pubkey,
+    input_token_mint: Pubkey,
+    output_token_mint: Pubkey,
+    input_token_program: Pubkey,
+    output_token_program: Pubkey,
+    max_amount_in: u64,
+    amount_out: u64,
+) -> Result<Vec<Instruction>> {
+    let payer = read_keypair_file(&config.payer_path)?;
+    let url = Cluster::Custom(config.http_url.clone(), config.ws_url.clone());
+    // Client.
+    let client = Client::new(url, Rc::new(payer));
+    let program = client.program(config.raydium_cp_program)?;
+
+    let (authority, __bump) = Pubkey::find_program_address(&[AUTH_SEED.as_bytes()], &program.id());
+
+    let instructions = program
+        .request()
+        .accounts(raydium_cp_accounts::Swap {
+            payer: program.payer(),
+            authority,
+            amm_config,
+            pool_state: pool_id,
+            input_token_account,
+            output_token_account,
+            input_vault,
+            output_vault,
+            input_token_program,
+            output_token_program,
+            input_token_mint,
+            output_token_mint,
+            observation_state: observation_account,
+        })
+        .args(raydium_cp_instructions::SwapBaseOutput { max_amount_in, amount_out })
+        .instructions()?;
+    Ok(instructions)
+}

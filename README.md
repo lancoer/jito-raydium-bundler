@@ -29,16 +29,16 @@ For cross region functionality, add the `--regions REGION1,REGION2,etc` arg. [Mo
 JitoTip can also be adjusted using `--jito-tip [lamport]`, e.g. `--jito-tip 1000000000` for 0.001 sol, default is 1000
 
 ```powershell
-# Mainnet (EURC / USDC)
+# Mainnet (EURC / WSOL)
 # cargo run send-bundle -h or --help to see inputs
-cargo run -- --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v 100000000 100 <USDC token> 1 <EURC token> 10 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
+cargo run -- --keypair-path auth.json send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr So11111111111111111111111111111111111111112 1000000000000000000 100000000 <WSOL token> 800000000000000000 <EURC token> 300000000 --disperse-wallets 96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5
 # Note: Don't provide --keypair-path argument if not planning to use authentication
 ```
 
 ```powershell
-# Testnet (EURC / USDC)
+# Testnet (USDC-Dev / WSOL)
 # cargo run send-bundle -h or --help to see inputs
-cargo run send-bundle HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU 100000000 100 5UDo7EdsHU5YaBSJCcmdA7c5idxykdZbR3D4TxrccxNN 1 9mRRczk7jbWG1rXHfnmHkmkwmrf9QoD1TpcNPT6CohVe 10 --disperse-wallets B1mrQSpdeMU9gCvkJ6VsXVVoYjRGkNA7TtjMyqxrhecH
+cargo run send-bundle Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr So11111111111111111111111111111111111111112 1000000000000000 100000000 EfG44HibCCbURqpWnhFfcAvSETKg1ezx6FvufPo8xF2o 800000000000000 FoGowrRGnpupeLyHZjPv96gtUaHcXM6tgrtsR17U8rC6 300000000 --disperse-wallets B1mrQSpdeMU9gCvkJ6VsXVVoYjRGkNA7TtjMyqxrhecH
 # Note: Don't provide --keypair-path argument if not planning to use authentication
 ```
 
